@@ -4,7 +4,7 @@ A simple portal where clients log in with a magic link, see where they are in yo
 
 ## Status
 
-Scaffolded. Auth, database, and admin tools will be added in later steps.
+Live on Vercel. Auth, database, client dashboard, and admin CRUD are all working. Production URL: <https://client-portal-five-chi.vercel.app>. Custom domain (`portal.dealroom.media`) is on the roadmap.
 
 ## Tech stack (in plain terms)
 
@@ -69,9 +69,56 @@ Real values live in `.env.local` on your machine only (never committed to git). 
 
 Anything prefixed with `NEXT_PUBLIC_` is bundled into the browser. Anything without that prefix is server-only and stays on the server.
 
-## What's next
+## Deployment
 
-1. Create the Supabase tables (`clients`, `project_links`, `activity_log`) with Row Level Security.
-2. Build the magic-link auth flow.
-3. Build the client dashboard and admin panel.
-4. Deploy to Vercel.
+Production runs on Vercel, auto-deploys from `main` on every push. Pushes to other branches create preview deploys at unique `*.vercel.app` URLs.
+
+### Vercel environment variables
+
+Set in Vercel → Project Settings → Environment Variables, scoped to Production + Preview + Development:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `ADMIN_EMAIL`
+
+### Supabase URL configuration
+
+Supabase → Authentication → URL Configuration:
+
+- **Site URL**: `https://client-portal-five-chi.vercel.app` (the value `{{ .SiteURL }}` expands to in email templates)
+- **Redirect URLs**:
+  - `http://localhost:3000/auth/callback` (local dev)
+  - `https://*.vercel.app/auth/callback` (Vercel previews + production)
+  - `https://portal.dealroom.media/auth/callback` (pre-authorized for the future custom domain)
+
+### Magic-link email template
+
+Supabase → Authentication → Email Templates → Magic Link uses the token-hash flow rather than the default PKCE redirect:
+
+```html
+<a href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&type=magiclink">Log In</a>
+```
+
+This is what allows magic links to work cross-browser and cross-device (the PKCE default needs the verifier cookie on the originating browser).
+
+### Custom SMTP
+
+Auth emails route through Resend, sender `noreply@dealroom.media` on the verified `dealroom.media` domain. Configured under Supabase → Project Settings → Auth → SMTP. Lifts the default per-hour rate limits.
+
+## Database migrations
+
+Tracked in `supabase/migrations/`. Applied manually via Supabase SQL Editor (no Supabase CLI workflow yet).
+
+- `0001_initial_schema.sql` — `clients`, `project_links`, `activity_log` tables, enums, updated_at triggers, `is_admin()` helper, RLS policies.
+- `0002_record_link_click.sql` — `SECURITY DEFINER` RPC the dashboard calls when a client clicks an Open button.
+
+The `is_admin()` SQL function hardcodes the admin email — if `ADMIN_EMAIL` ever changes, update both the env var AND the function.
+
+## Roadmap
+
+- Custom domain (`portal.dealroom.media`) — DNS + final Site URL flip.
+- Better landing page content (currently a placeholder).
+- Email notifications to admin when clients view links / hit milestones.
+- 404 / 500 / loading states polish.
+- Mobile responsiveness pass.
+- Vercel Analytics + error monitoring.
