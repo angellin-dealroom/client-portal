@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { NewClientDialog } from "./new-client-dialog";
 import { StageCell } from "./stage-cell";
+import { InviteButton } from "./invite-button";
 import type { ClientStage } from "./constants";
 
 function formatDateTime(iso: string): string {
@@ -103,7 +104,7 @@ export default async function AdminPage() {
                     <TableHead>Email</TableHead>
                     <TableHead>Stage</TableHead>
                     <TableHead>Last updated</TableHead>
-                    <TableHead className="w-[80px]"></TableHead>
+                    <TableHead className="w-[200px] text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -124,12 +125,18 @@ export default async function AdminPage() {
                         {formatDateTime(c.updated_at)}
                       </TableCell>
                       <TableCell className="text-right">
-                        <Link
-                          href={`/admin/clients/${c.id}`}
-                          className="text-sm underline-offset-4 hover:underline"
-                        >
-                          Edit
-                        </Link>
+                        <div className="flex justify-end items-center gap-1">
+                          <InviteButton
+                            clientId={c.id}
+                            clientEmail={c.email}
+                          />
+                          <Link
+                            href={`/admin/clients/${c.id}`}
+                            className="text-sm underline-offset-4 hover:underline px-2"
+                          >
+                            Edit
+                          </Link>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}

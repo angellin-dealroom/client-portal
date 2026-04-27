@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { SignOutButton } from "@/components/sign-out-button";
 import type { ClientStage, LinkStatus, LinkType } from "../../constants";
+import { InviteButton } from "../../invite-button";
 import { EditClientForm } from "./edit-form";
 import { DeleteClientDialog } from "./delete-client-dialog";
 
@@ -58,7 +59,15 @@ export default async function ClientDetailPage({
               {client.name}
             </h1>
           </div>
-          <SignOutButton />
+          <div className="flex items-center gap-2">
+            <InviteButton
+              clientId={client.id}
+              clientEmail={client.email}
+              variant="outline"
+              size="default"
+            />
+            <SignOutButton />
+          </div>
         </div>
 
         <EditClientForm

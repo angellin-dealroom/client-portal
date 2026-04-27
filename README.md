@@ -116,9 +116,17 @@ The `is_admin()` SQL function hardcodes the admin email — if `ADMIN_EMAIL` eve
 
 ## Roadmap
 
-- Custom domain (`portal.dealroom.media`) — DNS + final Site URL flip.
-- Better landing page content (currently a placeholder).
-- Email notifications to admin when clients view links / hit milestones.
+In priority order:
+
+1. **Send invite email from admin** — admin clicks a button on a client row, client receives a branded magic-link email inviting them in.
+2. **Real landing page** — replace the placeholder with a minimal explainer + Sign in button.
+3. **Mobile responsiveness pass** — dashboard cards, stage indicator, admin table.
+4. **Branded magic-link email** via Resend, applied to both regular sign-in and the invite email from #1.
+5. **Email notifications to admin** when a client views a link.
+
+Deferred:
+
+- Custom domain `portal.dealroom.media` (DNS access pending).
 - 404 / 500 / loading states polish.
-- Mobile responsiveness pass.
 - Vercel Analytics + error monitoring.
+- E2E tests.
