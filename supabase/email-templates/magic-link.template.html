@@ -1,0 +1,63 @@
+<!--
+  Supabase magic-link email template.
+
+  PASTE THIS into Supabase dashboard:
+    Authentication → Email Templates → Magic Link → Message (HTML).
+
+  This file is NOT loaded by the app — it lives in the Supabase
+  dashboard, not our running code. Keep it in the repo as the
+  source-of-truth diff target.
+
+  Template variables:
+    {{ .SiteURL }}    - Supabase substitutes the configured Site URL
+    {{ .TokenHash }}  - Supabase substitutes the per-request token hash
+
+  Hand-crafted to match the visual output of `brandedEmailHtml` in
+  src/lib/email-template.ts. If you restyle the scaffolder, regenerate
+  this file (call brandedEmailHtml with the sign-in content shape and
+  swap the URL for the {{ .SiteURL }}/{{ .TokenHash }} placeholders).
+
+  Subject (set separately in Supabase): "Sign in to your Dealroom Media portal"
+-->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+  </head>
+  <body style="margin: 0; padding: 0; background: #fafafa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #18181b;">
+    <div style="display: none; max-height: 0; overflow: hidden; mso-hide: all; opacity: 0; color: transparent;">Click to sign in to your Dealroom Media portal.</div>
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #fafafa;">
+      <tr>
+        <td align="center" style="padding: 32px 16px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 540px; background: #ffffff; border: 1px solid #e4e4e7; border-radius: 8px;">
+            <tr>
+              <td style="padding: 32px;">
+                <p style="margin: 0 0 20px 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #71717a;">Dealroom Media</p>
+                <div style="font-size: 15px; line-height: 1.55; color: #18181b;">
+                  <p style="margin: 0 0 16px 0;">Hi,</p>
+                  <p style="margin: 0 0 16px 0;">Click the button below to sign in to your Dealroom Media portal.</p>
+                  <p style="margin: 24px 0;">
+                    <a href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&amp;type=magiclink" style="display: inline-block; padding: 12px 22px; background: #18181b; color: #fafafa; text-decoration: none; border-radius: 6px; font-weight: 500;">Sign in to your portal</a>
+                  </p>
+                  <p style="margin: 0 0 16px 0;">A few things to know about the link:</p>
+                  <ul style="margin: 0 0 16px 0; padding-left: 20px;">
+                    <li style="margin: 0 0 6px 0;">It expires in 1 hour</li>
+                    <li style="margin: 0 0 6px 0;">It can only be used once &mdash; after you click it and log in, you'll need a new link to sign in again</li>
+                    <li style="margin: 0 0 6px 0;">If you didn't request this link, you can safely ignore this email &mdash; no one can access your portal without clicking the link</li>
+                  </ul>
+                  <p style="margin: 24px 0 0 0;">Talk soon,<br>Shamus</p>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 0 32px 24px 32px;">
+                <p style="margin: 0; font-size: 12px; color: #71717a;">Dealroom Media &middot; Client Portal</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
