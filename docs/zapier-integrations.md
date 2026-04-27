@@ -17,64 +17,95 @@ Audience: Angel and Shamus, building Zaps in the Dealroom Media Zapier workspace
 | **Typeform** | Trigger: form submissions | Built-in Zapier app. Requires Shamus to authorize. |
 | **SavvyCal** | Trigger: meeting scheduled / cancelled | Built-in Zapier app. May be limited; verify trigger options when setting up. |
 | **Day.ai** | Bidirectional sync with Day.ai contacts/timeline | TBD — see §5.5. May not have a first-party Zapier app; fallback is Webhooks by Zapier. |
-| **Supabase** | Action: read/write rows in our `clients`, `project_links`, `activity_log` tables | Built-in Zapier app. One connection used by all Zaps. See §2 for setup. |
+| **PostgreSQL** | Action: read/write rows in our `clients`, `project_links`, `activity_log` tables via direct DB connection | Built-in Zapier app. **Supabase has not built a first-party Zapier app**; we connect to Supabase's underlying Postgres directly. One connection reused by all Zaps. See §2 for setup. |
 | **Webhooks by Zapier** | Action: POST to our portal's `/api/notify-admin` endpoint to send branded notification emails (see §3) | Built-in. No external auth — uses a shared secret set as a Zapier connection or per-Zap header. |
 
 You don't need separate Resend or Gmail connectors if you go with the recommended notification strategy in §3.
 
 ---
 
-## 2. Supabase connector setup
+## 2. PostgreSQL connection to Supabase
 
-The Zapier Supabase connector needs credentials with permission to read and write our three tables. Two viable approaches; we recommend the second.
+Zapier doesn't have a first-party Supabase app (verified late 2025; Zapier's own page says "Supabase has not yet built an integration on Zapier"). The standard workaround is to use Zapier's **PostgreSQL** connector and point it at Supabase's underlying Postgres database directly. Same outcome: Zaps can read/write our three tables.
 
-### Option A — service role key (simplest, broader blast radius)
+### 2.1 Create a dedicated `zapier` Postgres role
 
-Use the same `SUPABASE_SERVICE_ROLE_KEY` already in `.env.local` and Vercel. This bypasses RLS entirely — Zapier can read/write everything.
+Run this **once** in **Supabase → SQL Editor**. Save the SQL as `supabase/migrations/0003_zapier_role.sql` so it's tracked alongside the other migrations.
 
-**Trade-off:** anyone with access to the Zapier workspace effectively has full database access. Acceptable if Shamus and Angel are the only Zapier admins.
-
-### Option B — dedicated Zapier role (recommended)
-
-Create a Postgres role with permissions narrowed to exactly what the Zaps need. Run this once in **Supabase → SQL Editor** (call it migration `0003_zapier_role.sql` if you want it tracked):
+**Generate a strong password before running** — e.g. `openssl rand -base64 32` in your terminal — and substitute it for the placeholder. Save the password somewhere safe (1Password, etc.); you'll paste it into Zapier next.
 
 ```sql
--- Dedicated role for Zapier. Bypasses RLS (BYPASSRLS) so it can write
--- to clients/project_links/activity_log without a JWT, but only on
--- the public schema and only on those tables.
-create role zapier with login bypassrls password '<generate-a-strong-password>';
+-- Dedicated Postgres role for Zapier's direct DB connection.
+-- BYPASSRLS lets it read/write tables that have RLS enabled
+-- (clients, project_links, activity_log) without needing JWT
+-- context — RLS policies require a logged-in user, which Zapier
+-- is not. Narrowed grants below restrict it to the three tables
+-- we actually need.
+create role zapier with login bypassrls password 'REPLACE-WITH-STRONG-PASSWORD';
 
 grant usage on schema public to zapier;
+
 grant select, insert, update on public.clients       to zapier;
 grant select, insert, update on public.project_links to zapier;
 grant select, insert         on public.activity_log  to zapier;
 
--- No delete grants — Zapier should never delete rows. If a Zap needs
--- to delete (unlikely), grant explicitly.
+-- No DELETE grants — Zaps should never delete rows. If a future
+-- Zap genuinely needs delete, grant explicitly then.
 
--- For UUID generation on inserts — usually inherited but be explicit.
-grant execute on function public.gen_random_uuid() to zapier;
+-- PKs default to gen_random_uuid() so no sequence grants needed.
 ```
 
-Then in **Supabase → Project Settings → Database** find the **Connection string** for the `zapier` role and use that in Zapier's Supabase connector setup.
+### 2.2 Find Supabase's Postgres connection credentials
 
-Zapier's Supabase connector typically asks for:
-- **Project URL**: `https://nzyugdbdsvpeipqbqxdg.supabase.co`
-- **API key**: paste the service role key (Option A) **or** if Zapier supports custom DB connections, use the `zapier` role's connection string (Option B)
+Supabase dashboard → **Project Settings** → **Database**. Two sections matter:
 
-**Note:** as of late 2025, the Zapier Supabase app uses the REST API (PostgREST) and accepts an API key, not a direct Postgres connection. The REST API only respects keys issued by Supabase Auth (anon, service role) — custom Postgres roles aren't selectable through the connector. **In practice this means Option A (service role) is what you'll use** unless the Zapier connector has been updated to support custom roles. Verify when you go to set it up; if Option B isn't available through the connector, fall back to Option A and treat the Zapier workspace access as a security boundary.
+- **Connection info** (top): the **direct connection**. Host typically `db.<project-ref>.supabase.co`, port `5432`, database `postgres`.
+- **Connection pooling**: the **transaction pooler**. Host `aws-0-<region>.pooler.supabase.com`, port `6543`, database `postgres`.
 
-### RLS considerations
+**Use the transaction pooler (port 6543).** Zapier opens a fresh connection for each step, which is exactly what poolers are designed for. Direct connections work but are wasteful for short-lived workloads and Supabase's free tier has stricter limits there.
 
-Service role bypasses RLS, so Zaps can read/write everything regardless of policies. This is correct for our use case — Zaps are operating on behalf of you (the admin), not on behalf of a logged-in client.
+### 2.3 Configure Zapier's PostgreSQL connector
 
-The browser-side anon key still goes through RLS as before. Nothing about the existing client/admin login flow changes.
+In Zapier: top-right avatar → **My Apps** → **Add connection** → search **PostgreSQL**.
 
-### Where the API key lives
+| Field | Value |
+|---|---|
+| Host | from the pooler row, e.g. `aws-0-<region>.pooler.supabase.com` (read it off Supabase's dashboard — region varies) |
+| Port | `6543` |
+| Database | `postgres` |
+| Username | **`zapier.nzyugdbdsvpeipqbqxdg`** (the role name **suffixed with the project ref**) |
+| Password | the password you set in §2.1 |
+| Schema | `public` |
+| SSL | **Required** (Supabase enforces it) |
 
-In Zapier, store the service role key as part of the Supabase **connection** (set up once under Account Settings → Connections, then reused across all Zaps). Don't paste it as a per-step variable — connections are encrypted; per-step values can leak in step-history views.
+The username suffix (`.nzyugdbdsvpeipqbqxdg`) is how Supabase's transaction pooler routes connections to the right project — it's not part of the Postgres role name itself. If you connect to the direct port (5432) instead, the username is just `zapier` with no suffix.
 
-In our codebase, the same value already lives in `.env.local` (local) and Vercel env vars (production). Zapier's copy is a third location. If the key is rotated, all three places need updating.
+Connection name: `Supabase Postgres — Dealroom Media production`.
+
+After saving, run a quick **Test connection** if Zapier offers it; otherwise the next phase will exercise it.
+
+### 2.4 RLS considerations
+
+The `zapier` role has `BYPASSRLS`, so policies don't apply to its queries. That's correct: Zaps act as the admin on automated paths, not as an authenticated client. Browser-side traffic still goes through PostgREST + RLS as before — nothing about the existing client/admin login flow changes.
+
+### 2.5 Security boundaries
+
+**Treat Zapier workspace access as production database access.** The `zapier` role has read/write access to every client record. Whoever can edit Zaps can effectively read or modify any client data.
+
+Required hygiene:
+- **2FA on the Zapier account.** Non-negotiable.
+- **2FA on the Supabase account** that holds the database password.
+- **Workspace members:** only Angel and Shamus, no contractors or interns. If that needs to change, rotate the `zapier` password (run `alter role zapier with password '...'` in Supabase SQL Editor) and update the Zapier connection under a fresh workspace user.
+- **No third-party Zapier apps.** Don't connect Zaps to external apps outside this handbook (logging tools, "AI summarizer" apps, etc.) — they'd see Postgres row data flowing through. If you ever do, audit what data they receive.
+- **If the Zapier account is compromised:** treat it as a Supabase data breach. Rotate the `zapier` password as a single emergency operation. The portal's `SUPABASE_SERVICE_ROLE_KEY` is a separate credential and doesn't need rotation just because Zapier is compromised.
+
+### 2.6 Where the password lives
+
+The Zapier PostgreSQL connection stores the password encrypted, scoped to your workspace. **Do not** put this password in `.env.local`, Vercel, or anywhere in the codebase — the portal doesn't need it. The only places it should exist are:
+1. The Zapier connection
+2. Your password manager (1Password, etc.) for backup
+
+If rotated, update both.
 
 ### Security boundaries
 
@@ -172,13 +203,13 @@ Each playbook is a step-by-step blueprint for a Zap. Naming convention: `[Source
 
 1. **Trigger:** Stripe → New Checkout Session Completed.
 2. **Filter:** Only continue if `client_reference_id` is not blank. If blank, fork to a "send admin notification — payment without client_reference_id" path (see edge cases below) and stop.
-3. **Action:** Supabase → **Find Row**. Table: `clients`. Filter: `id = {{trigger.client_reference_id}}`. Sets up the next steps with the client's name, email, and current stage.
+3. **Action:** PostgreSQL → **Find Row**. Table: `clients`. Filter: `id = {{trigger.client_reference_id}}`. Sets up the next steps with the client's name, email, and current stage.
 4. **Filter:** only continue if Find Row returned a result. Otherwise fork to "send notification — unknown client_reference_id" and stop.
-5. **Action:** Supabase → **Find Row** in `project_links`. Filter: `client_id = {{step3.id}} AND link_type = 'payment'`. Captures the row's id (or null if it doesn't exist yet).
-6. **Path A — payment row exists:** Supabase → **Update Row** in `project_links`. Row id = `{{step5.id}}`. Set `status = 'completed'`.
-7. **Path B — payment row doesn't exist:** Supabase → **Create Row** in `project_links`. `client_id`, `link_type='payment'`, `status='completed'`, `url=null`.
-8. **Path / Filter:** Only if `step3.stage = 'contract'`, then Supabase → **Update Row** in `clients`. Row id = `{{step3.id}}`. Set `stage = 'onboarding'`.
-9. **Action:** Supabase → **Create Row** in `activity_log`:
+5. **Action:** PostgreSQL → **Find Row** in `project_links`. Filter: `client_id = {{step3.id}} AND link_type = 'payment'`. Captures the row's id (or null if it doesn't exist yet).
+6. **Path A — payment row exists:** PostgreSQL → **Update Row** in `project_links`. Row id = `{{step5.id}}`. Set `status = 'completed'`.
+7. **Path B — payment row doesn't exist:** PostgreSQL → **New Row** in `project_links`. `client_id`, `link_type='payment'`, `status='completed'`, `url=null`.
+8. **Path / Filter:** Only if `step3.stage = 'contract'`, then PostgreSQL → **Update Row** in `clients`. Row id = `{{step3.id}}`. Set `stage = 'onboarding'`.
+9. **Action:** PostgreSQL → **New Row** in `activity_log`:
    - `client_id = {{step3.id}}`
    - `action = 'payment_completed'`
    - `metadata = { "stripe_session_id": "{{trigger.id}}", "stripe_payment_intent": "{{trigger.payment_intent}}", "amount_cents": {{trigger.amount_total}}, "currency": "{{trigger.currency}}", "prior_stage": "{{step3.stage}}", "advanced_stage": {{step3.stage == 'contract'}} }` (exact JSON shape may need tweaking based on how Zapier handles JSONB fields).
@@ -208,10 +239,10 @@ Each playbook is a step-by-step blueprint for a Zap. Naming convention: `[Source
 **Zap steps:**
 
 1. **Trigger:** Stripe → New Refund.
-2. **Action:** Supabase → **Find Row** in `activity_log`. Filter: `action = 'payment_completed' AND metadata->>stripe_payment_intent = {{trigger.payment_intent}}`. (You may need to use Zapier's "Custom Filter" syntax for the JSONB field. If the Supabase connector doesn't support JSONB filters, use Code by Zapier with a direct REST call to PostgREST.)
+2. **Action:** PostgreSQL → **Find Row** in `activity_log`. Filter: `action = 'payment_completed' AND metadata->>stripe_payment_intent = {{trigger.payment_intent}}`. (You may need to use Zapier's "Custom Filter" syntax for the JSONB field. If the Supabase connector doesn't support JSONB filters, use Code by Zapier with a direct REST call to PostgREST.)
 3. **Filter:** if Find Row returned a result, continue with client identification; otherwise fork to "orphan refund" path.
-4. **Action (if matched):** Supabase → **Find Row** in `clients`. id = `{{step2.client_id}}`.
-5. **Action:** Supabase → **Create Row** in `activity_log`:
+4. **Action (if matched):** PostgreSQL → **Find Row** in `clients`. id = `{{step2.client_id}}`.
+5. **Action:** PostgreSQL → **New Row** in `activity_log`:
    - `client_id = {{step4.id}}`
    - `action = 'payment_refunded'`
    - `metadata = { stripe_charge_id, stripe_payment_intent, amount_refunded_cents, currency, reason }`
@@ -240,13 +271,13 @@ If either field is missing on a signed document, the Zap notifies admin instead 
 
 1. **Trigger:** PandaDoc → Document Completed.
 2. **Filter:** Only continue if `document_type` custom field equals `proposal` (for the proposal Zap) or `contract` (build a separate Zap; same shape, different filter and different stage transition). Do **not** filter on document name — name is for humans, `document_type` is the contract.
-3. **Action:** extract `client_id` from custom field. Supabase → **Find Row** in `clients` by id.
+3. **Action:** extract `client_id` from custom field. PostgreSQL → **Find Row** in `clients` by id.
 4. **Filter:** only continue if client found.
-5. **Action:** Supabase → **Find Row** in `project_links` by `client_id` + `link_type = 'proposal'` (or `'contract'`).
-6. **Action:** Supabase → **Update Row** (or Create Row if not found): set `status = 'completed'`.
-7. **Filter:** for the **proposal** Zap, only continue stage-advance if `clients.stage = 'discovery'`. Action: Supabase → **Update Row** in `clients`, set `stage = 'proposal'`.
+5. **Action:** PostgreSQL → **Find Row** in `project_links` by `client_id` + `link_type = 'proposal'` (or `'contract'`).
+6. **Action:** PostgreSQL → **Update Row** (or Create Row if not found): set `status = 'completed'`.
+7. **Filter:** for the **proposal** Zap, only continue stage-advance if `clients.stage = 'discovery'`. Action: PostgreSQL → **Update Row** in `clients`, set `stage = 'proposal'`.
    For the **contract** Zap, only continue stage-advance if `clients.stage = 'proposal'`. Action: set `stage = 'contract'`.
-8. **Action:** Supabase → **Create Row** in `activity_log`:
+8. **Action:** PostgreSQL → **New Row** in `activity_log`:
    - `action = 'proposal_signed'` or `'contract_signed'`
    - `metadata = { pandadoc_document_id, document_name, recipient_email, prior_stage, advanced_stage }`
 9. **Action:** Webhooks by Zapier → POST to `/api/notify-admin`. Subject: `{{step3.name}} signed their {proposal|contract}`. Paragraphs explain + stage note. CTA to admin client page.
@@ -272,11 +303,11 @@ If either field is missing on a signed document, the Zap notifies admin instead 
 
 1. **Trigger:** Typeform → New Entry.
 2. **Filter:** Only continue if `hidden.client_id` is not blank.
-3. **Action:** Supabase → **Find Row** in `clients` by `id = {{trigger.hidden.client_id}}`.
+3. **Action:** PostgreSQL → **Find Row** in `clients` by `id = {{trigger.hidden.client_id}}`.
 4. **Filter:** only continue if found. Otherwise fork to notification: "Typeform submission with unknown client_id".
-5. **Action:** Supabase → **Find Row** in `project_links`, `client_id` + `link_type='onboarding'`. Update or Create with `status='completed'`.
-6. **Filter / Path:** if `clients.stage = 'onboarding'`, Supabase → **Update Row** in `clients` set `stage = 'active'`.
-7. **Action:** Supabase → **Create Row** in `activity_log`. `action='onboarding_form_submitted'`. metadata: `{ typeform_response_id, hidden_fields, prior_stage, advanced_stage }`.
+5. **Action:** PostgreSQL → **Find Row** in `project_links`, `client_id` + `link_type='onboarding'`. Update or Create with `status='completed'`.
+6. **Filter / Path:** if `clients.stage = 'onboarding'`, PostgreSQL → **Update Row** in `clients` set `stage = 'active'`.
+7. **Action:** PostgreSQL → **New Row** in `activity_log`. `action='onboarding_form_submitted'`. metadata: `{ typeform_response_id, hidden_fields, prior_stage, advanced_stage }`.
 8. **Action:** Webhooks by Zapier → POST to `/api/notify-admin`. Subject: `{{step3.name}} submitted their onboarding form`.
 
 **Edge cases:**
@@ -296,7 +327,7 @@ If either field is missing on a signed document, the Zap notifies admin instead 
 **Zap steps:**
 
 1. **Trigger:** SavvyCal → New Booking.
-2. **Action:** Supabase → **Find Row** in `clients` by `email = {{trigger.attendee.email}}`.
+2. **Action:** PostgreSQL → **Find Row** in `clients` by `email = {{trigger.attendee.email}}`.
 3. **Filter:** only continue if found.
 4. **Action:** Supabase → Find/Update/Create in `project_links` for `kickoff` link_type. Set `status='completed'`.
 5. **Action:** Supabase → Create Row in `activity_log`. `action='kickoff_scheduled'`. metadata: `{ savvycal_event_id, scheduled_at, scheduling_url }`.
@@ -329,7 +360,7 @@ If either field is missing on a signed document, the Zap notifies admin instead 
 Build incrementally. Don't move on until each Zap has been tested with a real (or test-mode) event end-to-end.
 
 1. **Portal-side: build `/api/notify-admin`** (one-time portal task — see §3.1). Test by curling it locally and from a Zapier Webhooks step.
-2. **Zapier-side: set up the Supabase connection** with the service role key (§2). Test by running a simple "Find Row in clients" step and confirming Ada's row comes back.
+2. **Zapier-side: set up the PostgreSQL connection** to Supabase (§2). Test by running a simple "Find Row in clients" step and confirming Ada's row comes back.
 3. **Zap 1: Stripe — Payment Completed** (§5.1). Trigger a test-mode Payment Link with a real `client_reference_id`, watch the Zap run.
 4. **Zap 2: Stripe — Refund** (§5.2). Refund the test-mode payment from step 3 and watch the orphan-vs-matched paths.
 5. **Zap 3: PandaDoc — Proposal Signed** (§5.3). Send a test document to yourself, sign it, watch the Zap.
@@ -379,7 +410,7 @@ Each Zap should be left **OFF** in Zapier until tested with at least one real ev
 
 ## 8. Open questions / decisions still to make
 
-- **Supabase connector auth:** confirm whether Zapier's current Supabase app supports custom Postgres roles or only the Supabase API keys. Likely the latter — go with service role and treat Zapier workspace access as a security boundary (§2).
+- **JSONB metadata in PG connector:** the `activity_log.metadata` column is JSONB. Zapier's PostgreSQL "New Row" action may or may not handle JSONB cleanly via the column-by-column UI. If it doesn't, fall back to the **SQL Statement** action with a parameterized `insert into activity_log (...) values (..., '{...}'::jsonb)` query. Verify when building the first Zap that touches activity_log.
 - **Activity_log dedup:** for v1, accept that retries can produce duplicate rows. Revisit if the recent-activity feed becomes noisy.
 - **Day.ai integration shape:** see §5.6.
 - **Live Stripe rollover:** when to switch from test mode to live. After at least one real client has run through the test-mode flow successfully.
@@ -390,7 +421,7 @@ Each Zap should be left **OFF** in Zapier until tested with at least one real ev
 ## Summary
 
 - **One portal change required**: build `/api/notify-admin` so Zaps can fire branded emails through the existing scaffolder. Everything else is configured in Zapier.
-- **One database role change recommended** (but not required): create a `zapier` Postgres role with narrowed permissions. Likely not usable through the Zapier connector — fall back to service role.
+- **One database role required**: create a `zapier` Postgres role with narrowed permissions and BYPASSRLS, used by Zapier's PostgreSQL connector (Supabase has no first-party Zapier app).
 - **Five Zaps to build initially** (Stripe payment, Stripe refund, PandaDoc proposal, PandaDoc contract, Typeform, SavvyCal). Day.ai deferred to a separate planning session.
 - **Stage advancement is conservative**: only advance forward, only when prior stage matches expectation, otherwise leave alone and warn in the notification.
 - **No DB rollback on refunds/cancellations** — log + notify only.
