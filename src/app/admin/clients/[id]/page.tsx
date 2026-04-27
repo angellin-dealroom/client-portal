@@ -47,7 +47,7 @@ export default async function ClientDetailPage({
   return (
     <main className="min-h-screen p-8">
       <div className="max-w-3xl mx-auto space-y-8">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-1">
             <Link
               href="/admin"

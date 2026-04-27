@@ -95,7 +95,7 @@ export default async function AdminPage() {
               No clients yet. Click <span className="font-medium">New client</span> to add one.
             </p>
           ) : (
-            <div className="border rounded-md">
+            <div className="border rounded-md overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -157,7 +157,7 @@ export default async function AdminPage() {
               {activity.map((a) => (
                 <li
                   key={a.id}
-                  className="flex items-center justify-between px-4 py-3 text-sm"
+                  className="flex flex-col gap-1 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
                 >
                   <span>
                     <span className="font-medium">

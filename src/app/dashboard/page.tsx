@@ -91,7 +91,13 @@ export default async function DashboardPage() {
           ) : (
             <div className="space-y-2">
               <p className="text-sm text-muted-foreground">Current stage</p>
-              <div className="flex flex-wrap items-center gap-1 text-sm">
+              <div className="sm:hidden">
+                <span className="inline-block px-2.5 py-1 rounded-md bg-primary text-primary-foreground text-sm font-medium">
+                  Stage {currentStageIndex + 1} of {STAGES.length}:{" "}
+                  {STAGE_LABELS[client.stage]}
+                </span>
+              </div>
+              <div className="hidden sm:flex flex-wrap items-center gap-1 text-sm">
                 {STAGES.map((stage, i) => (
                   <span key={stage} className="flex items-center gap-1">
                     <span
