@@ -19,8 +19,12 @@ export type EmailContent = {
   preheader?: string;
   greeting: string;
   blocks: EmailBlock[];
-  /** Multi-line allowed; rendered with <br> in HTML, newlines in text. */
-  signoff: string;
+  /**
+   * Multi-line allowed; rendered with <br> in HTML, newlines in text.
+   * Omit for internal/automated notifications where a sign-off would
+   * feel weird (e.g. emailing yourself).
+   */
+  signoff?: string;
 };
 
 const ACCENT = "#18181b";
@@ -68,9 +72,11 @@ export function brandedEmailHtml(content: EmailContent): string {
   const blocksHtml = content.blocks.map(renderBlockHtml).join("\n");
 
   const signoffHtml = content.signoff
-    .split("\n")
-    .map((line) => escapeHtml(line))
-    .join("<br>");
+    ? `<p style="margin: 24px 0 0 0;">${content.signoff
+        .split("\n")
+        .map((line) => escapeHtml(line))
+        .join("<br>")}</p>`
+    : "";
 
   const preheader = content.preheader
     ? `<div style="display: none; max-height: 0; overflow: hidden; mso-hide: all; opacity: 0; color: transparent;">${escapeHtml(content.preheader)}</div>`
@@ -94,7 +100,7 @@ export function brandedEmailHtml(content: EmailContent): string {
                 <div style="font-size: 15px; line-height: 1.55; color: ${FOREGROUND};">
                   <p style="margin: 0 0 16px 0;">${escapeHtml(content.greeting)}</p>
                   ${blocksHtml}
-                  <p style="margin: 24px 0 0 0;">${signoffHtml}</p>
+                  ${signoffHtml}
                 </div>
               </td>
             </tr>
@@ -125,10 +131,9 @@ export function brandedEmailText(content: EmailContent): string {
     })
     .join("\n\n");
 
+  const signoffBlock = content.signoff ? `\n\n${content.signoff}\n` : "\n";
+
   return `${content.greeting}
 
-${blocksText}
-
-${content.signoff}
-`;
+${blocksText}${signoffBlock}`;
 }

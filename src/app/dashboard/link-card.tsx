@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { recordLinkClick } from "./actions";
 
 export type LinkMeta = {
   label: string;
@@ -56,14 +56,11 @@ export function LinkCard({
     window.open(link.url, "_blank", "noopener,noreferrer");
 
     setPending(true);
-    const supabase = createClient();
-    const { error } = await supabase.rpc("record_link_click", {
-      p_link_id: link.id,
-    });
+    const result = await recordLinkClick(link.id);
     setPending(false);
 
-    if (error) {
-      console.error("record_link_click failed:", error);
+    if (!result.ok) {
+      console.error("recordLinkClick failed:", result.error);
       return;
     }
 
