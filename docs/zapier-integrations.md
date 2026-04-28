@@ -195,16 +195,146 @@ Each playbook is a step-by-step blueprint for a Zap. Naming convention: `[Source
 - Event: **New Checkout Session Completed** (this fires when `checkout.session.completed` arrives — same event the webhook approach was going to handle)
 - *If that exact event isn't available in Zapier's Stripe connector, fall back to "New Charge" and add a filter on `paid = true`.*
 
-**Identifying the client:**
-- Shamus must set `client_reference_id` on the Payment Link to the portal client's UUID when creating the link. This is the same plan we had for webhooks.
-- The trigger output exposes `client_reference_id`.
+**Identifying the client — three-stage match (Customer Details Email → Individual Name → Cardholder/Company):**
+
+Discovered during trigger-sample inspection: Stripe's top-level `customer_email` is *often blank* depending on the payment method. The reliable signals live under `customer_details`:
+
+- `customer_details.email` — consistently populated. **Stage 1 input.**
+- `customer_details.individual_name` — the actual person's name, populated even when paying with a corporate card. **Stage 2 input** against `clients.name`.
+- `customer_details.name` — the cardholder name. Often shows the company name on corporate cards, the person's name on personal cards. **Stage 3 input** against `clients.company`.
+
+Three-stage match logic:
+
+1. **Stage 1 — email** (case-insensitive, trimmed). Compare `customer_details.email` against `clients.email`. Hit → matched, stop.
+2. **Stage 2 — individual name** (case-insensitive, trimmed). Runs only when Stage 1 was empty. Compare `customer_details.individual_name` against `clients.name`. **Exactly one row** → matched, stop. **Multiple rows** → `orphan_ambiguous_name`, stop. **Zero rows** → continue to Stage 3.
+3. **Stage 3 — cardholder/company** (case-insensitive, trimmed). Runs only when Stage 2 found zero. Compare `customer_details.name` against `clients.company`. **Exactly one row** → matched, stop. **Multiple rows** → `orphan_ambiguous_company`, stop. **Zero rows** → `orphan_no_match`.
+
+**`match_reason` values:** `email`, `name`, `company`, `orphan_ambiguous_name`, `orphan_ambiguous_company`, `orphan_no_match`.
+
+**Why three stages.** Apple Pay sometimes inserts iCloud relay addresses that won't match. Corporate-card payments often have the company name as cardholder rather than the individual. Falling through email → individual → company catches the realistic spread of how Stripe Checkout fields get populated. Collisions go to orphan-notify so we never guess.
+
+**No Shamus behavior change.** He creates Payment Links as before; we match whatever Stripe captures from the customer.
+
+**`client_reference_id` still not used in v1.** Could be added as a deterministic stage-zero match if reliability ever needs to beat Shamus's ergonomics.
 
 **Zap steps:**
 
-1. **Trigger:** Stripe → New Checkout Session Completed.
-2. **Filter:** Only continue if `client_reference_id` is not blank. If blank, fork to a "send admin notification — payment without client_reference_id" path (see edge cases below) and stop.
-3. **Action:** PostgreSQL → **Find Row**. Table: `clients`. Filter: `id = {{trigger.client_reference_id}}`. Sets up the next steps with the client's name, email, and current stage.
-4. **Filter:** only continue if Find Row returned a result. Otherwise fork to "send notification — unknown client_reference_id" and stop.
+**Zap structure (high level):**
+
+```
+Trigger: Stripe Checkout Session Completed
+  ↓
+Filter: payment_status = "paid"
+  ↓
+PostgreSQL Custom Query: three-stage match (match_reason, matched_*, ambiguity_*)
+  ↓
+Paths by Zapier:
+  ├── A. Matched (email, name, or company)            → main flow
+  ├── B. Orphan — ambiguous (name OR company)         → notify admin, end
+  └── C. Orphan — no match                            → notify admin, end
+```
+
+**Zap steps:**
+
+1. **Trigger:** Stripe → Checkout Session Completed.
+
+2. **Filter:** Only continue if `payment_status` exactly matches `paid`. Defensive — Stripe fires `checkout.session.completed` for any completed session, including ones where the payment is still `unpaid` (e.g. delayed payment methods like ACH that haven't cleared). We only want to advance portal state on actual money-received events.
+
+3. **PostgreSQL Custom Query (three-stage match in one SQL pass).** Always returns exactly one row. The downstream Path step branches on `match_reason`. Output fields: `match_reason`, `matched_id`, `matched_name`, `matched_email`, `matched_stage`, `name_match_count`, `company_match_count`, `ambiguity_type`, `ambiguity_count`.
+
+   **Why inline values rather than parameter binding.** Zapier's PostgreSQL "Find Rows via Custom Query" action does not expose `$1`/`$2` parameter slots — it only takes a Query field, with merge fields substituted as raw text. We use **PostgreSQL dollar-quoting** (`$drm_8a3f$...$drm_8a3f$`) around each merge field so apostrophes and other special characters in customer names are treated as literal characters, not SQL syntax. The tag `drm_8a3f` is intentionally arbitrary and unique to this Zap — keep it the same wherever it appears in the query so the tags balance, and don't paste the tag into anything customer-visible. See §2.5 on workspace-access being the trust boundary.
+
+   Replace **each** placeholder with the corresponding Zapier merge field. Five total placeholders, three distinct merge fields:
+   - `<<DETAILS EMAIL>>` — appears 1× → map `customer_details.email`
+   - `<<INDIVIDUAL NAME>>` — appears 2× → map `customer_details.individual_name` (same field both times)
+   - `<<CARDHOLDER NAME>>` — appears 2× → map `customer_details.name` (same field both times)
+
+   **Use the merge-field picker for every placeholder — don't type values.**
+
+   ```sql
+   with
+     by_email as (
+       select id, name, email, stage
+       from clients
+       where lower(trim(email)) = lower(trim($drm_8a3f$<<DETAILS EMAIL>>$drm_8a3f$))
+       limit 1
+     ),
+     by_name_count as (
+       select count(*) as cnt
+       from clients
+       where lower(trim(name)) = lower(trim($drm_8a3f$<<INDIVIDUAL NAME>>$drm_8a3f$))
+     ),
+     by_name as (
+       select id, name, email, stage
+       from clients
+       where lower(trim(name)) = lower(trim($drm_8a3f$<<INDIVIDUAL NAME>>$drm_8a3f$))
+       limit 1
+     ),
+     by_company_count as (
+       select count(*) as cnt
+       from clients
+       where company is not null
+         and lower(trim(company)) = lower(trim($drm_8a3f$<<CARDHOLDER NAME>>$drm_8a3f$))
+     ),
+     by_company as (
+       select id, name, email, stage
+       from clients
+       where company is not null
+         and lower(trim(company)) = lower(trim($drm_8a3f$<<CARDHOLDER NAME>>$drm_8a3f$))
+       limit 1
+     )
+   select
+     case
+       when (select count(*) from by_email) > 0 then 'email'
+       when (select cnt from by_name_count) = 1 then 'name'
+       when (select cnt from by_name_count) > 1 then 'orphan_ambiguous_name'
+       when (select cnt from by_company_count) = 1 then 'company'
+       when (select cnt from by_company_count) > 1 then 'orphan_ambiguous_company'
+       else 'orphan_no_match'
+     end as match_reason,
+     case
+       when (select count(*) from by_email) > 0 then (select id from by_email)
+       when (select cnt from by_name_count) = 1 then (select id from by_name)
+       when (select cnt from by_company_count) = 1 then (select id from by_company)
+     end as matched_id,
+     case
+       when (select count(*) from by_email) > 0 then (select name from by_email)
+       when (select cnt from by_name_count) = 1 then (select name from by_name)
+       when (select cnt from by_company_count) = 1 then (select name from by_company)
+     end as matched_name,
+     case
+       when (select count(*) from by_email) > 0 then (select email from by_email)
+       when (select cnt from by_name_count) = 1 then (select email from by_name)
+       when (select cnt from by_company_count) = 1 then (select email from by_company)
+     end as matched_email,
+     case
+       when (select count(*) from by_email) > 0 then (select stage from by_email)
+       when (select cnt from by_name_count) = 1 then (select stage from by_name)
+       when (select cnt from by_company_count) = 1 then (select stage from by_company)
+     end as matched_stage,
+     (select cnt from by_name_count) as name_match_count,
+     (select cnt from by_company_count) as company_match_count,
+     case
+       when (select cnt from by_name_count) > 1 then 'name'
+       when (select cnt from by_name_count) = 0 and (select cnt from by_company_count) > 1 then 'company'
+     end as ambiguity_type,
+     case
+       when (select cnt from by_name_count) > 1 then (select cnt from by_name_count)
+       when (select cnt from by_name_count) = 0 and (select cnt from by_company_count) > 1 then (select cnt from by_company_count)
+     end as ambiguity_count;
+   ```
+
+   **Edge case — value contains the literal tag string `$drm_8a3f$`.** Dollar-quoting fails if a customer-supplied value happens to contain the closing tag verbatim. The SQL would fail to parse, Zapier marks the run as errored, and Zapier's built-in error alerts email you. Manually reconcile via Stripe dashboard. Probability of accidental occurrence is ~1 in 4 billion for an 8-hex-char tag; deliberate attack would require workspace access (which already implies DB access). If the tag is ever leaked publicly, generate a new one and update this query — the tag value isn't load-bearing beyond uniqueness.
+
+4. **Paths by Zapier — three branches** keyed off `match_reason`:
+
+   - **Path A — Matched** (rule: `match_reason` exactly matches `email` OR `name` OR `company`): continue with the main flow below.
+   - **Path B — Orphan, ambiguous** (rule: `match_reason` exactly matches `orphan_ambiguous_name` OR `orphan_ambiguous_company`): single Webhooks-by-Zapier POST → `/api/notify-admin`. Subject `Stripe payment from {{customer_details.email}} — ambiguous {{ambiguity_type}} match`. Body uses `ambiguity_type` (`name` or `company`) and `ambiguity_count` to describe the collision. No DB writes. End of path.
+   - **Path C — Orphan, no match** (rule: `match_reason` exactly matches `orphan_no_match`): single Webhooks-by-Zapier POST → `/api/notify-admin`. Subject `Stripe payment from {{customer_details.email}} — no portal match`. Body explains, includes session id. End of path.
+
+   **(Path A only — main flow:)**
+
+5. **PostgreSQL → Find Row** in `project_links`. Filter: `client_id = {{step3.matched_id}} AND link_type = 'payment'`. Captures the row's id (or null if it doesn't exist yet).
 5. **Action:** PostgreSQL → **Find Row** in `project_links`. Filter: `client_id = {{step3.id}} AND link_type = 'payment'`. Captures the row's id (or null if it doesn't exist yet).
 6. **Path A — payment row exists:** PostgreSQL → **Update Row** in `project_links`. Row id = `{{step5.id}}`. Set `status = 'completed'`.
 7. **Path B — payment row doesn't exist:** PostgreSQL → **New Row** in `project_links`. `client_id`, `link_type='payment'`, `status='completed'`, `url=null`.
@@ -224,9 +354,25 @@ Each playbook is a step-by-step blueprint for a Zap. Naming convention: `[Source
 
 **Edge cases:**
 
-- **No `client_reference_id`** → notification only ("Stripe payment without client_reference_id — Stripe session: {{id}}"). Don't write to DB.
-- **`client_reference_id` doesn't match any client** → notification only ("Stripe payment with unknown client_reference_id: {{ref}} — Stripe session: {{id}}"). Don't write to DB.
-- **Stripe retries the event** (Zapier will dedupe based on the event ID, but only within one Zap run; if Zapier has been off, the same event could process twice). Acceptable for now — duplicates produce extra activity_log rows but no broken state. If it becomes a problem, add a unique constraint or a Zapier "Storage by Zapier" step keyed by event ID.
+- **Stripe top-level `customer_email` is blank** → ignored. We use `customer_details.email` (consistently populated) as the Stage 1 input. The Filter step now gates on `payment_status = 'paid'` instead of email presence.
+- **Session has `payment_status = 'unpaid'`** (delayed payment methods like ACH that haven't cleared) → silent stop at the Filter. Stripe will fire a separate event when the payment actually succeeds; that's what we want to act on. *(If we later care about tracking "payment initiated but not yet cleared" as a portal stage, we'd add a separate Zap.)*
+- **Apple Pay relay address** (`*@privaterelay.appleid.com`) doesn't match anyone in `clients` → Stage 1 misses, Stage 2 takes over with `customer_details.individual_name`. If the customer's individual name is unique in the portal, the payment processes correctly.
+- **Corporate-card payment** where the cardholder name is the company → Stage 1 might miss (relay or unmatched email), Stage 2 might miss (cardholder isn't the individual), Stage 3 catches it via `clients.company`.
+- **Stage 2 finds multiple clients with the same individual name** (`orphan_ambiguous_name`) → Path B notification: "ambiguous name match (N clients have this name)". Don't write to DB. Manual reconcile: contact the customer or rename one of the duplicate-named portal clients.
+- **Stage 3 finds multiple clients with the same company** (`orphan_ambiguous_company`) → Path B notification: "ambiguous company match (N clients have this company)". Don't write to DB. Manual reconcile: same approach — contact or de-duplicate.
+- **All three stages miss** (`orphan_no_match`) → Path C notification: "no portal match." Could be a non-portal customer who paid by mistake, or a portal client whose email/individual-name/company don't match what Stripe captured. Manual reconcile.
+- **Multiple portal clients with the same email** → can't happen. `clients.email` has a unique constraint at the DB level (set in `0001_initial_schema.sql`). The `by_email` CTE returns one row or zero.
+- **Stripe retries the event** (Zapier dedupes within a single Zap run; if Zapier was off and the same event arrives twice, the writes happen twice — idempotent for `project_links.status = 'completed'` but extra `activity_log` rows would appear). Acceptable for v1.
+
+**Future enhancement (not v1) — pre-generate Payment Links from the portal.**
+
+The current flow leaves Payment Link creation as a manual Stripe-side step for Shamus, with the per-client price entered in Stripe's UI each time. A nicer flow:
+
+- Admin opens `/admin/clients/[id]`, enters an amount (e.g. matching the client's proposal), clicks "Generate payment link."
+- A new portal server action calls Stripe's API (using a server-only `STRIPE_SECRET_KEY`) to create a Payment Link with that amount and `client_reference_id` set to the client's UUID.
+- The returned URL is auto-saved to that client's `project_links.payment.url`.
+
+Benefits: zero manual Payment Link work; `client_reference_id` is always set so client matching is foolproof; payment amounts are version-controlled with the client record. Worth doing once the volume of clients makes manual link-creation feel painful, or when reliability of client matching becomes a priority over Shamus's setup ease.
 
 ### 5.2 Stripe — Refund (separate Zap)
 
